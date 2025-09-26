@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # attend_proto
 
 A new Flutter project.
@@ -14,3 +15,6 @@ A few resources to get you started if this is your first Flutter project:
 For help getting started with Flutter development, view the
 [online documentation](https://docs.flutter.dev/), which offers tutorials,
 samples, guidance on mobile development, and a full API reference.
+=======
+# attend_proto
+>>>>>>> 263b15a63ab828d18f290cd2c30ad445f97acd82
