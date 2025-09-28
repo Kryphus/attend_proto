@@ -8,9 +8,14 @@ import 'services/biometric_service.dart';
 import 'utils/distance.dart';
 import 'bg/heartbeat_runner.dart';
 import 'bg/heartbeat_task.dart';
+import 'config/feature_flags.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize and log feature flags
+  await FeatureFlags.initialize();
+  print(FeatureFlags.getLogString());
 
   // UI <-> Task comms
   FlutterForegroundTask.initCommunicationPort();
@@ -37,8 +42,10 @@ void main() async {
       playSound: false,
     ),
     foregroundTaskOptions: ForegroundTaskOptions(
-      // Use repeat event every 1 minute (60000 ms)
-      eventAction: ForegroundTaskEventAction.repeat(60000),
+      // Use repeat event based on feature flags
+      eventAction: ForegroundTaskEventAction.repeat(
+        FeatureFlags.heartbeatInterval.inMilliseconds,
+      ),
       allowWakeLock: true,  // 👈 keep CPU on during doze
       allowWifiLock: true,
       autoRunOnBoot: false,
@@ -98,9 +105,15 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
     });
   }
 
+  void _addFeatureFlagsToLog() {
+    _addTrackingLog('🚩 Environment: ${FeatureFlags.environment}');
+    _addTrackingLog('⏱️ Heartbeat: ${FeatureFlags.heartbeatInterval}');
+    _addTrackingLog('🔄 Sync: ${FeatureFlags.syncInterval}');
+  }
+
   void _startHeartbeatSimulator() {
     _heartbeatSimulator?.cancel();
-    _heartbeatSimulator = Timer.periodic(const Duration(minutes: 1), (timer) {
+    _heartbeatSimulator = Timer.periodic(FeatureFlags.heartbeatInterval, (timer) {
       if (_isPresenceTracking) {
         // Simulate different messages based on random chance
         final random = Random();
@@ -151,7 +164,13 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
       if (endTime != null) {
         setState(() {
           _eventStartTime = today.add(Duration(hours: startTime.hour, minutes: startTime.minute));
-          _eventEndTime = today.add(Duration(hours: endTime.hour, minutes: endTime.minute));
+          
+          // Calculate end time - if it's before start time, assume it's next day
+          var calculatedEndTime = today.add(Duration(hours: endTime.hour, minutes: endTime.minute));
+          if (calculatedEndTime.isBefore(_eventStartTime!)) {
+            calculatedEndTime = calculatedEndTime.add(const Duration(days: 1));
+          }
+          _eventEndTime = calculatedEndTime;
           _isEventActive = true;
         });
         
@@ -373,6 +392,7 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
 
       // 4. On success → call startPresence and show success message
       _addTrackingLog('🚀 Starting presence monitoring...');
+      _addFeatureFlagsToLog();
       _addTrackingLog('📍 Geofence set at (${_geofenceLatitude!.toStringAsFixed(6)}, ${_geofenceLongitude!.toStringAsFixed(6)}) with ${_geofenceRadius!.round()}m radius');
       
       await HeartbeatRunner.startPresence(
