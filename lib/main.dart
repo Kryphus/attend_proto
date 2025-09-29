@@ -5,10 +5,14 @@ import 'package:geolocator/geolocator.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'screens/map_fence_page.dart';
 import 'services/biometric_service.dart';
+import 'services/logging_service.dart';
 import 'utils/distance.dart';
 import 'bg/heartbeat_runner.dart';
 import 'bg/heartbeat_task.dart';
 import 'config/feature_flags.dart';
+import 'data/local/db.dart';
+import 'data/local/event_log_repo.dart';
+import 'data/local/outbox_repo.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,6 +20,22 @@ void main() async {
   // Initialize and log feature flags
   await FeatureFlags.initialize();
   print(FeatureFlags.getLogString());
+
+  // Initialize database
+  final database = AppDatabase();
+  final eventLogRepo = EventLogRepo(database);
+  final outboxRepo = OutboxRepo(database);
+
+  // Log initialization
+  logger.info(
+    'App initialization complete',
+    'main',
+    {
+      'environment': FeatureFlags.environment,
+      'heartbeat_interval_ms': FeatureFlags.heartbeatInterval.inMilliseconds,
+      'sync_interval_ms': FeatureFlags.syncInterval.inMilliseconds,
+    },
+  );
 
   // UI <-> Task comms
   FlutterForegroundTask.initCommunicationPort();
@@ -94,6 +114,17 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
   DateTime? _eventEndTime;
   DateTime? _checkInTime;
   bool _isEventActive = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Set up logging callback to integrate with existing UI logs
+    logger.setUILogCallback(_addTrackingLog);
+    
+    // Log database initialization
+    _addTrackingLog('💾 Local database initialized');
+    _addFeatureFlagsToLog();
+  }
 
   void _addTrackingLog(String message) {
     setState(() {
