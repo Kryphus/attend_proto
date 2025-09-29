@@ -1,17 +1,27 @@
 import 'package:local_auth/local_auth.dart';
 
+/// Result of biometric authentication
+class BiometricResult {
+  final bool success;
+  final DateTime? timestamp;
+  final String? error;
+
+  BiometricResult.success(this.timestamp) : success = true, error = null;
+  BiometricResult.failure(this.error) : success = false, timestamp = null;
+}
+
 class BiometricService {
   static final LocalAuthentication _localAuth = LocalAuthentication();
 
   /// Authenticates the user using biometrics ONLY (fingerprint or face recognition)
-  /// Returns true if authentication is successful, false otherwise
+  /// Returns BiometricResult with success status and timestamp
   /// 
   /// This method:
   /// - Requires actual biometric authentication (no PIN/password fallback)
   /// - Does not store any biometric data (exam-safe)
-  /// - Only returns a boolean result
+  /// - Returns result with timestamp for freshness validation
   /// - Fails if device doesn't support biometrics or no biometrics are enrolled
-  static Future<bool> authenticate() async {
+  Future<BiometricResult> authenticate() async {
     try {
       // Check if biometric authentication is available
       final bool isAvailable = await _localAuth.canCheckBiometrics;
@@ -23,13 +33,13 @@ class BiometricService {
       // Device must support biometric authentication
       if (!isDeviceSupported) {
         print('DEBUG: Device does not support biometric authentication');
-        return false;
+        return BiometricResult.failure('Device does not support biometric authentication');
       }
 
       // Biometrics must be enrolled and available
       if (!isAvailable) {
         print('DEBUG: No biometrics enrolled on this device');
-        return false;
+        return BiometricResult.failure('No biometrics enrolled on this device');
       }
 
       // Get available biometric types
@@ -41,7 +51,7 @@ class BiometricService {
       // Must have at least one biometric type available
       if (availableBiometrics.isEmpty) {
         print('DEBUG: No biometric types available');
-        return false;
+        return BiometricResult.failure('No biometric types available');
       }
 
       // Authenticate with biometrics ONLY (no PIN/password fallback)
@@ -54,11 +64,16 @@ class BiometricService {
       );
 
       print('DEBUG: Authentication result: $didAuthenticate');
-      return didAuthenticate;
+      
+      if (didAuthenticate) {
+        return BiometricResult.success(DateTime.now());
+      } else {
+        return BiometricResult.failure('Biometric authentication failed');
+      }
     } catch (e) {
       // Handle any errors during authentication
       print('DEBUG: Authentication error: $e');
-      return false;
+      return BiometricResult.failure('Authentication error: $e');
     }
   }
 
