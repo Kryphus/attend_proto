@@ -8,11 +8,12 @@ class SyncCursorRepo {
 
   /// Set the last synced timestamp for a key
   Future<void> setLastSynced(String key, DateTime timestamp) async {
-    await _db.into(_db.syncCursor).insertOnConflictUpdate(
+    await _db.into(_db.syncCursor).insert(
       SyncCursorCompanion(
         key: Value(key),
         lastSyncedAt: Value(timestamp),
       ),
+      mode: InsertMode.insertOrReplace,
     );
   }
 

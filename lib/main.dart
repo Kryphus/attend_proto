@@ -13,6 +13,14 @@ import 'config/feature_flags.dart';
 import 'data/local/db.dart';
 import 'data/local/event_log_repo.dart';
 import 'data/local/outbox_repo.dart';
+import 'data/local/sync_cursor_repo.dart';
+import 'data/remote/api_client.dart';
+import 'sync/sync_service.dart';
+import 'sync/connectivity_service.dart';
+import 'config/supabase_config.dart';
+import 'domain/attendance_service.dart';
+import 'domain/heartbeat_service.dart';
+import 'domain/rules/local_rules.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,10 +29,44 @@ void main() async {
   await FeatureFlags.initialize();
   print(FeatureFlags.getLogString());
 
+  // Initialize Supabase
+  await SupabaseConfig.initialize();
+
   // Initialize database
   final database = AppDatabase();
   final eventLogRepo = EventLogRepo(database);
   final outboxRepo = OutboxRepo(database);
+  final syncCursorRepo = SyncCursorRepo(database);
+
+  // Initialize sync services
+  final connectivityService = ConnectivityService();
+  await connectivityService.initialize(); // Initialize connectivity service
+  
+  final apiClient = SupabaseConfig.client != null ? ApiClient(SupabaseConfig.client!) : null;
+  final syncService = SyncService(
+    connectivityService: connectivityService,
+    syncCursorRepo: syncCursorRepo,
+    apiClient: apiClient,
+  );
+
+  // Initialize attendance and heartbeat services
+  final biometricService = BiometricService();
+  final attendanceService = AttendanceService(
+    eventLogRepo: eventLogRepo,
+    outboxRepo: outboxRepo,
+    biometricService: biometricService,
+  );
+  final heartbeatService = HeartbeatService(
+    eventLogRepo: eventLogRepo,
+    outboxRepo: outboxRepo,
+  );
+
+  // Initialize sync service (will start background sync)
+  try {
+    await syncService.initialize();
+  } catch (e) {
+    logger.error('Failed to initialize sync service', 'main', {'error': e.toString()});
+  }
 
   // Log initialization
   logger.info(
@@ -34,6 +76,9 @@ void main() async {
       'environment': FeatureFlags.environment,
       'heartbeat_interval_ms': FeatureFlags.heartbeatInterval.inMilliseconds,
       'sync_interval_ms': FeatureFlags.syncInterval.inMilliseconds,
+      'sync_service_initialized': syncService.isInitialized,
+      'supabase_configured': SupabaseConfig.isConfigured,
+      'api_client_available': apiClient != null,
     },
   );
 
@@ -72,11 +117,24 @@ void main() async {
     ),
   );
 
-  runApp(const MyApp());
+  runApp(MyApp(
+    syncService: syncService,
+    attendanceService: attendanceService,
+    connectivityService: connectivityService,
+  ));
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  final SyncService syncService;
+  final AttendanceService attendanceService;
+  final ConnectivityService connectivityService;
+
+  const MyApp({
+    super.key, 
+    required this.syncService,
+    required this.attendanceService,
+    required this.connectivityService,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -87,14 +145,27 @@ class MyApp extends StatelessWidget {
           colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
           useMaterial3: true,
         ),
-        home: const AttendanceHomePage(),
+        home: AttendanceHomePage(
+          syncService: syncService,
+          attendanceService: attendanceService,
+          connectivityService: connectivityService,
+        ),
       ),
     );
   }
 }
 
 class AttendanceHomePage extends StatefulWidget {
-  const AttendanceHomePage({super.key});
+  final SyncService syncService;
+  final AttendanceService attendanceService;
+  final ConnectivityService connectivityService;
+
+  const AttendanceHomePage({
+    super.key, 
+    required this.syncService,
+    required this.attendanceService,
+    required this.connectivityService,
+  });
 
   @override
   State<AttendanceHomePage> createState() => _AttendanceHomePageState();
@@ -120,10 +191,26 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
     super.initState();
     // Set up logging callback to integrate with existing UI logs
     logger.setUILogCallback(_addTrackingLog);
-    
+
     // Log database initialization
     _addTrackingLog('💾 Local database initialized');
     _addFeatureFlagsToLog();
+
+    // Log sync service status
+    _addTrackingLog('🔄 Sync service: ${widget.syncService.isInitialized ? "Ready" : "Initializing"}');
+    
+    // Log initial connectivity status
+    _addTrackingLog('🌐 Connectivity: ${widget.connectivityService.isConnected ? "Online" : "Offline"}');
+    
+    // Listen for connectivity changes
+    widget.connectivityService.connectivityStream.listen((isConnected) {
+      _addTrackingLog('🌐 Connectivity changed: ${isConnected ? "Online" : "Offline"}');
+      if (isConnected) {
+        _addTrackingLog('🔄 Network regained - sync will resume');
+      } else {
+        _addTrackingLog('📴 Network lost - working offline');
+      }
+    });
   }
 
   void _addTrackingLog(String message) {
@@ -323,133 +410,84 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
 
   void _checkIn() async {
     try {
-      // 1. Ensure a fence has been chosen
+      // 1. Check if geofence is set
       if (_geofenceLatitude == null || _geofenceLongitude == null || _geofenceRadius == null) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Please set a geofence first'),
+            content: Text('Please set geofence first'),
             backgroundColor: Colors.orange,
           ),
         );
         return;
       }
 
-      // 2. Get current location and verify isInside
-      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Location services are disabled. Please enable them.'),
-            backgroundColor: Colors.red,
-          ),
-        );
-        return;
-      }
+      _addTrackingLog('🚀 Starting check-in process...');
+      _addTrackingLog('🌐 Connectivity: ${widget.connectivityService.isConnected ? "Online" : "Offline"}');
 
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Location permissions are required for check-in'),
-              backgroundColor: Colors.red,
-            ),
-          );
-          return;
-        }
-      }
-
-      if (permission == LocationPermission.deniedForever) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Location permissions are permanently denied. Please enable in settings.'),
-            backgroundColor: Colors.red,
-          ),
-        );
-        return;
-      }
-
-      // Get current position
-      Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-        timeLimit: const Duration(seconds: 30),
-      );
-
-      // Check if inside fence
-      bool isInside = DistanceUtils.isInside(
-        lat: position.latitude,
-        lng: position.longitude,
+      // 2. Create session and device info for validation
+      final session = SessionInfo(
+        sessionId: 'session-${DateTime.now().millisecondsSinceEpoch}',
+        startTime: DateTime.now().subtract(const Duration(hours: 1)), // Allow 1 hour before
+        endTime: DateTime.now().add(const Duration(hours: 8)), // Allow 8 hours after
         centerLat: _geofenceLatitude!,
         centerLng: _geofenceLongitude!,
         radiusMeters: _geofenceRadius!,
       );
 
-      if (!isInside) {
-        double distance = DistanceUtils.getDistance(
-          lat1: position.latitude,
-          lng1: position.longitude,
-          lat2: _geofenceLatitude!,
-          lng2: _geofenceLongitude!,
-        );
+      final device = DeviceInfo(
+        deviceId: 'device-${DateTime.now().millisecondsSinceEpoch}',
+        isTrusted: true, // For demo purposes
+      );
+
+      // 3. Use AttendanceService to capture sign-in (includes all validation)
+      final result = await widget.attendanceService.captureSignIn(
+        session: session,
+        device: device,
+        lastEventType: null, // First event
+      );
+
+      if (result.success) {
+        // 4. On success → start background tracking
+        _addTrackingLog('✅ Sign-in captured successfully!');
+        _addTrackingLog('📝 Event ID: ${result.eventId}');
+        _addTrackingLog('💾 Status: PENDING (will sync when online)');
         
+        await HeartbeatRunner.startPresence(
+          centerLat: _geofenceLatitude!,
+          centerLng: _geofenceLongitude!,
+          radiusMeters: _geofenceRadius!,
+        );
+
+        setState(() {
+          _isPresenceTracking = true;
+          _presenceStatus = 'Tracking started - Inside fence';
+          _checkInTime = DateTime.now();
+        });
+        
+        _addTrackingLog('🕐 Check-in time: ${_formatTime(_checkInTime!)}');
+        _startHeartbeatSimulator();
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('You are outside the fence (${distance.round()}m away)'),
-            backgroundColor: Colors.orange,
+            content: Text(widget.connectivityService.isConnected 
+              ? 'Check-in successful - will sync to server'
+              : 'Check-in successful - saved offline (will sync when online)'),
+            backgroundColor: Colors.green,
           ),
         );
-        return;
-      }
-
-      // 3. If inside → call BiometricService.authenticate
-      bool authenticated = await BiometricService.authenticate();
-      
-      if (!authenticated) {
-        // Check if biometrics are available to provide better error message
-        bool biometricAvailable = await BiometricService.isBiometricAvailable();
-        String errorMessage = biometricAvailable 
-            ? 'Biometric authentication failed. Check-in cancelled.'
-            : 'Biometric authentication not available on this device. Check-in cancelled.';
-            
+      } else {
+        // Handle failure
+        _addTrackingLog('❌ Sign-in failed: ${result.errorMessage}');
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(errorMessage),
+            content: Text('Check-in failed: ${result.errorMessage}'),
             backgroundColor: Colors.red,
           ),
         );
-        return;
       }
-
-      // 4. On success → call startPresence and show success message
-      _addTrackingLog('🚀 Starting presence monitoring...');
-      _addFeatureFlagsToLog();
-      _addTrackingLog('📍 Geofence set at (${_geofenceLatitude!.toStringAsFixed(6)}, ${_geofenceLongitude!.toStringAsFixed(6)}) with ${_geofenceRadius!.round()}m radius');
-      
-      await HeartbeatRunner.startPresence(
-        centerLat: _geofenceLatitude!,
-        centerLng: _geofenceLongitude!,
-        radiusMeters: _geofenceRadius!,
-      );
-
-      setState(() {
-        _isPresenceTracking = true;
-        _presenceStatus = 'Tracking started - Inside fence';
-        _checkInTime = DateTime.now();
-      });
-      
-      _addTrackingLog('✅ Successfully checked in and tracking started!');
-      _addTrackingLog('🕐 Check-in time: ${_formatTime(_checkInTime!)}');
-      _startHeartbeatSimulator();
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Presence tracking started'),
-          backgroundColor: Colors.green,
-        ),
-      );
 
     } catch (e) {
+      _addTrackingLog('💥 Check-in error: ${e.toString()}');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Check-in failed: ${e.toString()}'),
@@ -482,6 +520,28 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Failed to stop tracking: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  void _syncNow() async {
+    try {
+      _addTrackingLog('🔄 Manual sync triggered...');
+      await widget.syncService.syncNow();
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Sync triggered - check logs for progress'),
+          backgroundColor: Colors.blue,
+        ),
+      );
+    } catch (e) {
+      _addTrackingLog('❌ Sync failed: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Sync failed: $e'),
           backgroundColor: Colors.red,
         ),
       );
@@ -659,6 +719,29 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
                       ),
                     ),
                   ],
+                  
+                  // Sync Now Button (always available)
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 56,
+                    child: ElevatedButton.icon(
+                      onPressed: _syncNow,
+                      icon: const Icon(Icons.sync, size: 20),
+                      label: const Text(
+                        'Sync Now',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.teal[600],
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
                   
                   // Stop Tracking Button (only show when tracking and not at end time)
                   if (_isPresenceTracking && !_shouldCheckOut()) ...[
