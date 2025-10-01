@@ -22,6 +22,9 @@ import 'domain/attendance_service.dart';
 import 'domain/heartbeat_service.dart';
 import 'domain/reconcile_service.dart';
 import 'domain/rules/local_rules.dart';
+import 'widgets/offline_banner.dart';
+import 'widgets/event_status_card.dart';
+import 'widgets/event_history_list.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -199,6 +202,15 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
   DateTime? _checkInTime;
   bool _isEventActive = false;
 
+  // O6: Sync status and event tracking
+  bool _isConnected = false;
+  int _pendingCount = 0;
+  DateTime? _lastSyncTime;
+  DateTime? _lastReconcileTime;
+  List<EventLogData> _recentEvents = [];
+  Timer? _statusRefreshTimer;
+  StreamSubscription<bool>? _connectivitySubscription;
+
   @override
   void initState() {
     super.initState();
@@ -212,17 +224,30 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
     // Log sync service status
     _addTrackingLog('🔄 Sync service: ${widget.syncService.isInitialized ? "Ready" : "Initializing"}');
     
-    // Log initial connectivity status
-    _addTrackingLog('🌐 Connectivity: ${widget.connectivityService.isConnected ? "Online" : "Offline"}');
+    // O6: Initialize sync status tracking
+    _isConnected = widget.connectivityService.isConnected;
+    _addTrackingLog('🌐 Connectivity: ${_isConnected ? "Online" : "Offline"}');
     
-    // Listen for connectivity changes
-    widget.connectivityService.connectivityStream.listen((isConnected) {
+    // O6: Listen for connectivity changes and update UI state
+    _connectivitySubscription = widget.connectivityService.connectivityStream.listen((isConnected) {
+      setState(() {
+        _isConnected = isConnected;
+      });
       _addTrackingLog('🌐 Connectivity changed: ${isConnected ? "Online" : "Offline"}');
       if (isConnected) {
         _addTrackingLog('🔄 Network regained - sync will resume');
+        _refreshSyncStatus(); // Refresh status when coming back online
       } else {
         _addTrackingLog('📴 Network lost - working offline');
       }
+    });
+
+    // O6: Load initial status
+    _refreshSyncStatus();
+
+    // O6: Set up periodic refresh (every 5 seconds for responsive UI)
+    _statusRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _refreshSyncStatus();
     });
   }
 
@@ -240,6 +265,37 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
     _addTrackingLog('🚩 Environment: ${FeatureFlags.environment}');
     _addTrackingLog('⏱️ Heartbeat: ${FeatureFlags.heartbeatInterval}');
     _addTrackingLog('🔄 Sync: ${FeatureFlags.syncInterval}');
+  }
+
+  // O6: Refresh sync status and event data
+  Future<void> _refreshSyncStatus() async {
+    try {
+      // Get database instance from sync service
+      final database = AppDatabase();
+      final eventLogRepo = EventLogRepo(database);
+
+      // Get pending count
+      final pendingCount = await eventLogRepo.getCountByStatus(EventStatus.pending);
+
+      // Get sync status
+      final syncStatus = await widget.syncService.getSyncStatus();
+
+      // Get last reconcile time
+      final lastReconcileTime = await widget.syncService.getLastReconcileTime();
+
+      // Get recent events (last 20)
+      final recentEvents = await eventLogRepo.getEvents(limit: 20);
+
+      // Update state
+      setState(() {
+        _pendingCount = pendingCount;
+        _lastSyncTime = syncStatus.lastSyncTime;
+        _lastReconcileTime = lastReconcileTime;
+        _recentEvents = recentEvents;
+      });
+    } catch (e) {
+      logger.error('Failed to refresh sync status', 'AttendanceHomePage', {'error': e.toString()});
+    }
   }
 
   void _startHeartbeatSimulator() {
@@ -393,6 +449,8 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
   @override
   void dispose() {
     _heartbeatSimulator?.cancel();
+    _statusRefreshTimer?.cancel(); // O6: Clean up status refresh timer
+    _connectivitySubscription?.cancel(); // O6: Clean up connectivity subscription
     super.dispose();
   }
 
@@ -544,6 +602,12 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
       _addTrackingLog('🔄 Manual sync triggered...');
       await widget.syncService.syncNow();
       
+      // O6: Also trigger reconciliation
+      await widget.syncService.reconcileNow();
+      
+      // O6: Refresh status after sync
+      await _refreshSyncStatus();
+      
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Sync triggered - check logs for progress'),
@@ -578,11 +642,18 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
         centerTitle: true,
       ),
       backgroundColor: Colors.grey[50],
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      body: Column(
+        children: [
+          // O6: Offline banner (only show when offline)
+          if (!_isConnected) const OfflineBanner(),
+          
+          // Main scrollable content
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
             // Welcome Section
             Container(
               width: double.infinity,
@@ -985,6 +1056,51 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
               ),
               const SizedBox(height: 16),
             ],
+
+            // O6: Event Status Card (Pending count + Last sync)
+            EventStatusCard(
+              pendingCount: _pendingCount,
+              lastSyncTime: _lastSyncTime,
+              lastReconcileTime: _lastReconcileTime,
+            ),
+            const SizedBox(height: 24),
+
+            // O6: Event History List
+            EventHistoryList(
+              events: _recentEvents,
+              maxEvents: 20,
+              onEventTap: (event) {
+                // Show event details in a dialog
+                showDialog(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    title: const Text('Event Details'),
+                    content: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Type: ${event.type}'),
+                        const SizedBox(height: 8),
+                        Text('Status: ${event.status}'),
+                        const SizedBox(height: 8),
+                        Text('Created: ${event.createdAt}'),
+                        if (event.serverReason != null) ...[
+                          const SizedBox(height: 8),
+                          Text('Reason: ${event.serverReason}'),
+                        ],
+                      ],
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Close'),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 24),
             
             // Geofence Information Display
             Container(
@@ -1064,8 +1180,11 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
                 ],
               ),
             ),
-          ],
-        ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

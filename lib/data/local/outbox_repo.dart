@@ -1,6 +1,7 @@
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 import 'package:sqlite3/sqlite3.dart';
+import 'dart:convert';
 import 'db.dart';
 import '../../services/logging_service.dart';
 
@@ -42,8 +43,15 @@ class OutboxItem {
   }
 
   static Map<String, dynamic> _decodePayload(String payload) {
-    // For now, return empty map as placeholder - in production you'd use dart:convert jsonDecode
-    return {};
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      return {};
+    } catch (_) {
+      return {};
+    }
   }
 }
 
@@ -177,8 +185,11 @@ class OutboxRepo {
   }
 
   String _encodePayload(Map<String, dynamic> payload) {
-    // For now, use toString() - in production you'd use dart:convert jsonEncode
-    return payload.toString();
+    try {
+      return jsonEncode(payload);
+    } catch (_) {
+      return '{}';
+    }
   }
 }
 
