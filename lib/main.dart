@@ -20,6 +20,7 @@ import 'sync/connectivity_service.dart';
 import 'config/supabase_config.dart';
 import 'domain/attendance_service.dart';
 import 'domain/heartbeat_service.dart';
+import 'domain/reconcile_service.dart';
 import 'domain/rules/local_rules.dart';
 
 void main() async {
@@ -43,10 +44,21 @@ void main() async {
   await connectivityService.initialize(); // Initialize connectivity service
   
   final apiClient = SupabaseConfig.client != null ? ApiClient(SupabaseConfig.client!) : null;
+  
+  // Initialize reconciliation service (only if API client is available)
+  final reconcileService = apiClient != null
+      ? ReconcileService(
+          eventLogRepo: eventLogRepo,
+          syncCursorRepo: syncCursorRepo,
+          apiClient: apiClient,
+        )
+      : null;
+  
   final syncService = SyncService(
     connectivityService: connectivityService,
     syncCursorRepo: syncCursorRepo,
     apiClient: apiClient,
+    reconcileService: reconcileService,
   );
 
   // Initialize attendance and heartbeat services
@@ -79,6 +91,7 @@ void main() async {
       'sync_service_initialized': syncService.isInitialized,
       'supabase_configured': SupabaseConfig.isConfigured,
       'api_client_available': apiClient != null,
+      'reconciliation_enabled': reconcileService != null,
     },
   );
 

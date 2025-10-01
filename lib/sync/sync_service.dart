@@ -1,7 +1,9 @@
 import 'dart:async';
 import '../services/logging_service.dart';
 import '../data/local/sync_cursor_repo.dart';
+import '../data/local/event_log_repo.dart';
 import '../data/remote/api_client.dart';
+import '../domain/reconcile_service.dart';
 import 'sync_worker.dart';
 import 'connectivity_service.dart';
 
@@ -12,17 +14,21 @@ class SyncService {
   final ConnectivityService _connectivityService;
   final SyncCursorRepo _syncCursorRepo;
   final ApiClient? _apiClient;
+  final ReconcileService? _reconcileService;
   
   StreamSubscription<void>? _reconnectionSubscription;
+  Timer? _reconcileTimer;
   bool _isInitialized = false;
 
   SyncService({
     required ConnectivityService connectivityService,
     required SyncCursorRepo syncCursorRepo,
     ApiClient? apiClient,
+    ReconcileService? reconcileService,
   }) : _connectivityService = connectivityService,
        _syncCursorRepo = syncCursorRepo,
-       _apiClient = apiClient;
+       _apiClient = apiClient,
+       _reconcileService = reconcileService;
 
   /// Initialize the sync service
   Future<void> initialize() async {
@@ -50,6 +56,11 @@ class SyncService {
         },
       );
 
+      // Start periodic reconciliation (every 5 minutes)
+      if (_reconcileService != null) {
+        _startPeriodicReconciliation();
+      }
+
       _isInitialized = true;
 
       logger.info(
@@ -57,6 +68,7 @@ class SyncService {
         _component,
         {
           'connectivity_status': _connectivityService.isConnected,
+          'reconciliation_enabled': _reconcileService != null,
         },
       );
 
@@ -73,13 +85,77 @@ class SyncService {
   /// Handle connectivity regained
   void _onConnectivityRegained() {
     logger.info(
-      'Connectivity regained, triggering sync',
+      'Connectivity regained, triggering sync and reconciliation',
       _component,
       {},
     );
     
-    // Trigger immediate sync when connectivity is regained
+    // Trigger immediate sync and reconciliation when connectivity is regained
     syncNow();
+    reconcileNow();
+  }
+
+  /// Start periodic reconciliation
+  void _startPeriodicReconciliation() {
+    // Run reconciliation every 5 minutes
+    const reconcileInterval = Duration(minutes: 5);
+    
+    _reconcileTimer = Timer.periodic(reconcileInterval, (timer) {
+      reconcileNow();
+    });
+
+    logger.info(
+      'Periodic reconciliation started',
+      _component,
+      {'interval_minutes': reconcileInterval.inMinutes},
+    );
+  }
+
+  /// Trigger manual reconciliation
+  Future<void> reconcileNow() async {
+    if (_reconcileService == null) {
+      logger.warn(
+        'Reconciliation requested but service not available',
+        _component,
+        {},
+      );
+      return;
+    }
+
+    try {
+      logger.info('Manual reconciliation requested', _component, {});
+
+      // Check connectivity first
+      final isConnected = await _connectivityService.checkConnectivity();
+      if (!isConnected) {
+        logger.warn(
+          'Reconciliation requested but no connectivity',
+          _component,
+          {'connectivity_status': false},
+        );
+        return;
+      }
+
+      // Run reconciliation
+      final result = await _reconcileService!.reconcile();
+
+      logger.info(
+        'Reconciliation completed',
+        _component,
+        {
+          'success': result.success,
+          'events_updated': result.eventsUpdated,
+          'events_checked': result.eventsChecked,
+        },
+      );
+
+    } catch (e) {
+      logger.error(
+        'Failed to trigger reconciliation',
+        _component,
+        {'error': e.toString()},
+      );
+    }
   }
 
   /// Trigger manual sync
@@ -152,9 +228,15 @@ class SyncService {
   /// Dispose of resources
   void dispose() {
     _reconnectionSubscription?.cancel();
+    _reconcileTimer?.cancel();
     _connectivityService.dispose();
     
     logger.info('Sync service disposed', _component, {});
+  }
+
+  /// Get last reconciliation time
+  Future<DateTime?> getLastReconcileTime() async {
+    return _reconcileService?.getLastReconcileTime();
   }
 }
 
