@@ -2,6 +2,7 @@ import 'package:geolocator/geolocator.dart';
 import '../data/local/event_log_repo.dart';
 import '../data/local/outbox_repo.dart';
 import '../services/logging_service.dart';
+import '../services/metrics_service.dart';
 import 'rules/local_rules.dart';
 
 /// Service for generating periodic heartbeat events
@@ -99,6 +100,11 @@ class HeartbeatService {
         },
       );
 
+      metrics.increment(MetricsService.captureHeartbeat);
+      metrics.increment(MetricsService.captureSuccess);
+      metrics.increment(MetricsService.outboxEnqueued);
+      metrics.increment(MetricsService.eventPending);
+
       logger.info('Heartbeat generated successfully', _component, {
         'event_id': eventId,
         'dedupe_key': dedupeKey,
@@ -109,6 +115,7 @@ class HeartbeatService {
       return true;
 
     } catch (e) {
+      metrics.increment(MetricsService.captureFailure);
       logger.error('Heartbeat generation failed', _component, {
         'error': e.toString(),
         'session_id': session.sessionId,

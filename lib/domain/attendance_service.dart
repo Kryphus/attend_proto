@@ -4,6 +4,7 @@ import '../data/local/event_log_repo.dart';
 import '../data/local/outbox_repo.dart';
 import '../services/biometric_service.dart';
 import '../services/logging_service.dart';
+import '../services/metrics_service.dart';
 import 'rules/local_rules.dart';
 
 /// Result of an attendance capture operation
@@ -53,12 +54,21 @@ class AttendanceService {
       'device_id': device.deviceId,
     });
 
-    return await _captureEvent(
+    metrics.increment(MetricsService.captureSignIn);
+    final result = await _captureEvent(
       type: EventType.attendIn,
       session: session,
       device: device,
       lastEventType: lastEventType,
     );
+    
+    if (result.success) {
+      metrics.increment(MetricsService.captureSuccess);
+    } else {
+      metrics.increment(MetricsService.captureFailure);
+    }
+    
+    return result;
   }
 
   /// Capture a sign-out event
@@ -72,12 +82,21 @@ class AttendanceService {
       'device_id': device.deviceId,
     });
 
-    return await _captureEvent(
+    metrics.increment(MetricsService.captureSignOut);
+    final result = await _captureEvent(
       type: EventType.attendOut,
       session: session,
       device: device,
       lastEventType: lastEventType,
     );
+    
+    if (result.success) {
+      metrics.increment(MetricsService.captureSuccess);
+    } else {
+      metrics.increment(MetricsService.captureFailure);
+    }
+    
+    return result;
   }
 
   /// Internal method to capture any attendance event
@@ -131,8 +150,11 @@ class AttendanceService {
           'event_type': type.value,
         });
 
+        metrics.increment(MetricsService.ruleViolation);
         return CaptureResult.failure(ruleResult.code!, ruleResult.message!);
       }
+
+      metrics.increment(MetricsService.rulePass);
 
       // 5. Create event payload
       final payload = _createEventPayload(eventData);
@@ -162,6 +184,9 @@ class AttendanceService {
           'biometric_timestamp': biometricResult.timestamp?.toIso8601String(),
         },
       );
+
+      metrics.increment(MetricsService.outboxEnqueued);
+      metrics.increment(MetricsService.eventPending);
 
       logger.info('Event captured successfully', _component, {
         'event_id': eventId,

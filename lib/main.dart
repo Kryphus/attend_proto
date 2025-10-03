@@ -25,6 +25,7 @@ import 'domain/rules/local_rules.dart';
 import 'widgets/offline_banner.dart';
 import 'widgets/event_status_card.dart';
 import 'widgets/event_history_list.dart';
+import 'screens/dev_profile_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -640,6 +641,23 @@ class _AttendanceHomePageState extends State<AttendanceHomePage> {
         foregroundColor: Colors.black87,
         elevation: 0,
         centerTitle: true,
+        actions: [
+          // Dev Profile button
+          IconButton(
+            icon: const Icon(Icons.developer_mode, color: Colors.deepPurple),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => DevProfileScreen(
+                    syncService: widget.syncService,
+                  ),
+                ),
+              );
+            },
+            tooltip: 'Dev Profile',
+          ),
+        ],
       ),
       backgroundColor: Colors.grey[50],
       body: Column(

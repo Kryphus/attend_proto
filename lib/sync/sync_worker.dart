@@ -6,6 +6,7 @@ import '../data/local/outbox_repo.dart';
 import '../data/local/sync_cursor_repo.dart';
 import '../data/remote/api_client.dart';
 import '../services/logging_service.dart';
+import '../services/metrics_service.dart';
 import '../config/feature_flags.dart';
 import 'backoff_calculator.dart';
 
@@ -106,6 +107,7 @@ class SyncWorker {
     }
 
     try {
+      metrics.increment(MetricsService.syncAttempt);
       logger.info('Starting sync operation', _component, {});
 
       // Get items ready for sync
@@ -116,6 +118,7 @@ class SyncWorker {
         return true;
       }
 
+      metrics.increment(MetricsService.outboxDequeued, by: items.length);
       logger.info(
         'Processing sync batch',
         _component,
@@ -136,6 +139,13 @@ class SyncWorker {
 
       // Update sync cursor
       await _syncCursorRepo!.setLastSynced('last_sync', DateTime.now());
+
+      metrics.increment(MetricsService.syncBatchProcessed);
+      if (failureCount == 0) {
+        metrics.increment(MetricsService.syncSuccess);
+      } else {
+        metrics.increment(MetricsService.syncFailure);
+      }
 
       logger.info(
         'Sync batch completed',
@@ -224,14 +234,21 @@ class SyncWorker {
 
       // Handle response
       if (response.success) {
+        metrics.increment(MetricsService.outboxSyncSuccess);
         await _handleSyncSuccess(item, response);
         return true;
       } else {
+        metrics.increment(MetricsService.outboxSyncFailure);
+        if (response.isRetryable) {
+          metrics.increment(MetricsService.outboxRetry);
+        }
         await _handleSyncFailure(item, response.error!, isRetryable: response.isRetryable);
         return false;
       }
 
     } catch (e) {
+      metrics.increment(MetricsService.outboxSyncFailure);
+      metrics.increment(MetricsService.outboxRetry);
       await _handleSyncFailure(item, e.toString(), isRetryable: true);
       return false;
     }
@@ -246,6 +263,19 @@ class SyncWorker {
           : EventStatus.rejected;
       
       await _eventLogRepo!.markStatus(item.eventId, eventStatus, response.reason);
+
+      // Track metrics
+      if (eventStatus == EventStatus.confirmed) {
+        metrics.increment(MetricsService.eventConfirmed);
+        metrics.decrement(MetricsService.eventPending);
+      } else {
+        metrics.increment(MetricsService.eventRejected);
+        metrics.decrement(MetricsService.eventPending);
+      }
+
+      if (response.isDuplicate) {
+        metrics.increment(MetricsService.outboxDuplicate);
+      }
 
       // Remove from outbox
       await _outboxRepo!.removeItem(item.id);

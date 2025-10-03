@@ -2,6 +2,7 @@ import '../data/local/event_log_repo.dart';
 import '../data/local/sync_cursor_repo.dart';
 import '../data/remote/api_client.dart';
 import '../services/logging_service.dart';
+import '../services/metrics_service.dart';
 
 /// Service for reconciling local event statuses with authoritative server state
 /// 
@@ -31,6 +32,7 @@ class ReconcileService {
     final startTime = DateTime.now();
     
     try {
+      metrics.increment(MetricsService.reconcileAttempt);
       logger.info(
         'Starting reconciliation',
         _component,
@@ -94,6 +96,9 @@ class ReconcileService {
 
       final duration = DateTime.now().difference(startTime);
       
+      metrics.increment(MetricsService.reconcileSuccess);
+      metrics.increment(MetricsService.reconcileEventsUpdated, by: eventsUpdated);
+
       logger.info(
         'Reconciliation completed',
         _component,
@@ -114,6 +119,7 @@ class ReconcileService {
       );
 
     } catch (e) {
+      metrics.increment(MetricsService.reconcileFailure);
       logger.error(
         'Reconciliation failed',
         _component,

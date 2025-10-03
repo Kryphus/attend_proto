@@ -1,5 +1,6 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/logging_service.dart';
+import '../../services/metrics_service.dart';
 
 /// API client for Supabase backend communication
 class ApiClient {
@@ -71,6 +72,7 @@ class ApiClient {
         },
       );
 
+      metrics.increment(MetricsService.apiCallSuccess);
       return ApiResponse.success(
         status: result['status'] as String,
         reason: result['reason'] as String,
@@ -79,6 +81,14 @@ class ApiClient {
       );
 
     } catch (e) {
+      metrics.increment(MetricsService.apiCallFailure);
+      final isRetryable = _isRetryableError(e);
+      if (isRetryable) {
+        metrics.increment(MetricsService.apiRetryable);
+      } else {
+        metrics.increment(MetricsService.apiNonRetryable);
+      }
+
       logger.error(
         'Failed to post attendance event',
         _component,
@@ -90,7 +100,7 @@ class ApiClient {
 
       return ApiResponse.error(
         error: e.toString(),
-        isRetryable: _isRetryableError(e),
+        isRetryable: isRetryable,
       );
     }
   }
@@ -144,6 +154,7 @@ class ApiClient {
         },
       );
 
+      metrics.increment(MetricsService.apiCallSuccess);
       return ApiResponse.success(
         status: result['status'] as String,
         reason: result['reason'] as String,
@@ -152,6 +163,14 @@ class ApiClient {
       );
 
     } catch (e) {
+      metrics.increment(MetricsService.apiCallFailure);
+      final isRetryable = _isRetryableError(e);
+      if (isRetryable) {
+        metrics.increment(MetricsService.apiRetryable);
+      } else {
+        metrics.increment(MetricsService.apiNonRetryable);
+      }
+
       logger.error(
         'Failed to post heartbeat event',
         _component,
@@ -163,7 +182,7 @@ class ApiClient {
 
       return ApiResponse.error(
         error: e.toString(),
-        isRetryable: _isRetryableError(e),
+        isRetryable: isRetryable,
       );
     }
   }
