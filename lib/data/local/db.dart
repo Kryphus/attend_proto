@@ -48,8 +48,17 @@ class SyncCursor extends Table {
 
 @DriftDatabase(tables: [EventLog, Outbox, SyncCursor])
 class AppDatabase extends _$AppDatabase {
-  AppDatabase() : super(_openConnection());
+  // Singleton pattern
+  static AppDatabase? _instance;
+  
+  AppDatabase._internal() : super(_openConnection());
   AppDatabase.withExecutor(QueryExecutor executor) : super(executor);
+  
+  /// Get the singleton instance of the database
+  factory AppDatabase() {
+    _instance ??= AppDatabase._internal();
+    return _instance!;
+  }
 
   @override
   int get schemaVersion => 1;
